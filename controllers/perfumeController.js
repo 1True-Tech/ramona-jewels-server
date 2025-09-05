@@ -1,6 +1,8 @@
 const Perfume = require('../models/Perfume');
 const ErrorResponse = require('../utils/errorResponse');
 const asyncHandler = require('../utils/async');
+const fs = require('fs');
+const path = require('path');
 
 // @desc    Get all perfumes
 // @route   GET /api/v1/perfumes
@@ -86,5 +88,51 @@ exports.deletePerfume = asyncHandler(async (req, res, next) => {
   res.status(200).json({
     success: true,
     data: {},
+  });
+});
+
+// @desc    Upload perfume images
+// @route   POST /api/v1/perfumes/upload-images
+// @access  Private/Admin
+exports.uploadPerfumeImages = asyncHandler(async (req, res, next) => {
+  if (!req.files || !req.files.images) {
+    return next(new ErrorResponse('Please upload image files under the "images" field', 400));
+  }
+
+  const maxSize = Number(process.env.MAX_FILE_UPLOAD) || 5000000; // 5MB default
+  const uploadDir = path.join(__dirname, '../public/uploads/products');
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+
+  const files = Array.isArray(req.files.images) ? req.files.images : [req.files.images];
+  const urls = [];
+
+  for (const file of files) {
+    if (!file.mimetype.startsWith('image')) {
+      return next(new ErrorResponse('Please upload only image files', 400));
+    }
+    if (file.size > maxSize) {
+      return next(new ErrorResponse(`Please upload images less than ${Math.round(maxSize / 1000000)}MB`, 400));
+    }
+
+    const ext = path.parse(file.name).ext;
+    const unique = `${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+    const filename = `product_${unique}${ext}`;
+    const filePath = path.join(uploadDir, filename);
+
+    await new Promise((resolve, reject) => {
+      file.mv(filePath, (err) => {
+        if (err) return reject(err);
+        return resolve();
+      });
+    });
+
+    urls.push(`/uploads/products/${filename}`);
+  }
+
+  res.status(200).json({
+    success: true,
+    data: { urls },
   });
 });

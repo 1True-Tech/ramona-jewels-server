@@ -5,6 +5,7 @@ const {
   createPerfume,
   updatePerfume,
   deletePerfume,
+  uploadPerfumeImages,
 } = require('../controllers/perfumeController');
 const { protect, authorize } = require('../middlewares/auth');
 const advancedResults = require('../middlewares/advancedResults');
@@ -110,6 +111,9 @@ router
     getPerfumes
   )
   .post(protect, authorize('admin'), createPerfume);
+
+// Upload images for perfumes
+router.post('/upload-images', protect, authorize('admin'), uploadPerfumeImages);
 
 /**
  * @swagger
