@@ -1,7 +1,7 @@
 const Perfume = require('../models/Perfume');
 const ErrorResponse = require('../utils/errorResponse');
 const asyncHandler = require('../utils/async');
-const cart = require('../models/cart');
+const cart = require('../models/Cart');
 
 // @desc    Get user cart
 // @route   GET /api/v1/cart
