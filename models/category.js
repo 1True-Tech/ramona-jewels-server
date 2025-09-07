@@ -4,17 +4,23 @@ const categorySchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Please add a category name'],
-    unique: true,
     trim: true,
   },
   description: {
     type: String,
-    required: [true, 'Please add a description'],
+    required: false,
+    default: '',
   },
   image: {
     type: String,
     required: false,
     default: '',
+  },
+  productType: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ProductType',
+    required: [true, 'Please provide a product type for this category'],
+    index: true,
   },
   productCount: {
     type: Number,
@@ -25,5 +31,8 @@ const categorySchema = new mongoose.Schema({
     default: Date.now,
   },
 });
+
+// Ensure category name is unique within each product type
+categorySchema.index({ name: 1, productType: 1 }, { unique: true });
 
 module.exports = mongoose.model('Category', categorySchema);

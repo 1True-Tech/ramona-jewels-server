@@ -9,7 +9,7 @@ const {
 } = require('../controllers/perfumeController');
 const { protect, authorize } = require('../middlewares/auth');
 const advancedResults = require('../middlewares/advancedResults');
-const Perfume = require('../models/Perfume');
+const Perfume = require('../models/Products');
 
 const router = express.Router({ mergeParams: true });
 

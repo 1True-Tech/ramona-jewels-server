@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const perfumeSchema = new mongoose.Schema({
+const productSchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Please add a name'],
@@ -33,12 +33,10 @@ const perfumeSchema = new mongoose.Schema({
   },
   size: {
     type: String,
-    required: [true, 'Please add a size'],
   },
   concentration: {
     type: String,
     enum: ['EDT', 'EDP', 'Parfum', 'EDC'],
-    required: [true, 'Please add a concentration'],
   },
   topNotes: [String],
   middleNotes: [String],
@@ -50,7 +48,7 @@ const perfumeSchema = new mongoose.Schema({
   gender: {
     type: String,
     enum: ['Men', 'Women', 'Unisex'],
-    required: [true, 'Please specify gender'],
+    // required: [true, 'Please specify gender'],
   },
   inStock: {
     type: Boolean,
@@ -67,4 +65,4 @@ const perfumeSchema = new mongoose.Schema({
   },
 });
 
-module.exports = mongoose.model('Perfume', perfumeSchema);
+module.exports = mongoose.model('Products', productSchema);

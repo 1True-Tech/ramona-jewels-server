@@ -1,7 +1,7 @@
 const Order = require('../models/Order');
-const Perfume = require('../models/Perfume');
+const Perfume = require('../models/Products');
 const User = require('../models/User');
-const Cart = require('../models/Cart');
+// const Cart = require('../models/Cart');
 const asyncHandler = require('express-async-handler');
 
 // @desc    Get all orders with pagination and filtering

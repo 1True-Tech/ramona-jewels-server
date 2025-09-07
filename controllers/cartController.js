@@ -1,4 +1,4 @@
-const Perfume = require('../models/Perfume');
+const Perfume = require('../models/Products');
 const ErrorResponse = require('../utils/errorResponse');
 const asyncHandler = require('../utils/async');
 const cart = require('../models/cart');
