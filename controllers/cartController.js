@@ -1,7 +1,7 @@
 const Perfume = require('../models/Products');
 const ErrorResponse = require('../utils/errorResponse');
 const asyncHandler = require('../utils/async');
-const cart = require('../models/cart');
+
 
 // @desc    Get user cart
 // @route   GET /api/v1/cart
@@ -13,7 +13,7 @@ exports.getCart = asyncHandler(async (req, res, next) => {
   });
 
   if (!cart) {
-    cart = await Cart.create({ user: req.user.id, items: [] });
+    cart = await cart.create({ user: req.user.id, items: [] });
   }
 
   res.status(200).json({
@@ -41,10 +41,10 @@ exports.addToCart = asyncHandler(async (req, res, next) => {
   }
 
   // Find user's cart or create new one if doesn't exist
-  let cart = await Cart.findOne({ user: req.user.id });
+  let cart = await cart.findOne({ user: req.user.id });
 
   if (!cart) {
-    cart = await Cart.create({ user: req.user.id, items: [] });
+    cart = await cart.create({ user: req.user.id, items: [] });
   }
 
   // Check if item already exists in cart
@@ -82,7 +82,7 @@ exports.updateCartItem = asyncHandler(async (req, res, next) => {
   const { quantity } = req.body;
 
   // Find user's cart
-  const cart = await Cart.findOne({ user: req.user.id });
+  const cart = await cart.findOne({ user: req.user.id });
 
   if (!cart) {
     return next(new ErrorResponse('Cart not found', 404));
@@ -125,7 +125,7 @@ exports.updateCartItem = asyncHandler(async (req, res, next) => {
 // @access  Private
 exports.removeFromCart = asyncHandler(async (req, res, next) => {
   // Find user's cart
-  const cart = await Cart.findOne({ user: req.user.id });
+  const cart = await cart.findOne({ user: req.user.id });
 
   if (!cart) {
     return next(new ErrorResponse('Cart not found', 404));
@@ -155,7 +155,7 @@ exports.removeFromCart = asyncHandler(async (req, res, next) => {
 // @route   DELETE /api/v1/cart
 // @access  Private
 exports.clearCart = asyncHandler(async (req, res, next) => {
-  const cart = await Cart.findOneAndUpdate(
+  const cart = await cart.findOneAndUpdate(
     { user: req.user.id },
     { items: [], total: 0, itemCount: 0 },
     { new: true }
