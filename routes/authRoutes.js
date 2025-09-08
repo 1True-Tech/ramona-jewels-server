@@ -7,6 +7,8 @@ const {
   refreshToken,
   updateProfile,
   changePassword,
+  googleLogin,
+  facebookLogin,
 } = require('../controllers/authController');
 const { protect } = require('../middlewares/auth');
 
@@ -90,6 +92,8 @@ router.post('/register', register);
  *               $ref: '#/components/schemas/Error'
  */
 router.post('/login', login);
+router.post('/google', googleLogin);
+router.post('/facebook', facebookLogin);
 
 /**
  * @swagger

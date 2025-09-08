@@ -18,9 +18,20 @@ const userSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: [true, 'Please add a password'],
+    required: function () { return this.provider === 'local'; },
     minlength: 6,
     select: false,
+  },
+  provider: {
+    type: String,
+    enum: ['local', 'google', 'facebook'],
+    default: 'local',
+  },
+  googleId: {
+    type: String,
+  },
+  facebookId: {
+    type: String,
   },
   role: {
     type: String,
@@ -134,16 +145,18 @@ userSchema.pre('save', function (next) {
 
 // Encrypt password using bcrypt
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) {
-    next();
+  if (!this.isModified('password') || !this.password) {
+    return next();
   }
 
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
+  return next();
 });
 
 // Match user entered password to hashed password in database
 userSchema.methods.matchPassword = async function (enteredPassword) {
+  if (!this.password) return false;
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
