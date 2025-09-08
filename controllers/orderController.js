@@ -1,8 +1,20 @@
 const Order = require('../models/Order');
 const Perfume = require('../models/Products');
 const User = require('../models/User');
-// const Cart = require('../models/Cart');
+const Cart = require('../models/Cart');
 const asyncHandler = require('express-async-handler');
+const { getIO } = require('../config/socket');
+
+// Stripe setup
+let stripe = null
+try {
+  const Stripe = require('stripe')
+  if (process.env.STRIPE_SECRET_KEY) {
+    stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+  }
+} catch (_) {
+  // Stripe not installed or no key; endpoints will guard against null
+}
 
 // @desc    Get all orders with pagination and filtering
 // @route   GET /api/admin/orders
@@ -266,6 +278,15 @@ const createOrder = asyncHandler(async (req, res) => {
     const tax = subtotal * 0.08; // 8% tax
     const total = subtotal + shipping + tax;
 
+    // Normalize addresses to match schema
+    const fallback = { name: customerInfo?.name || req.user.name, phone: customerInfo?.phone || req.user.phone }
+    const normalizedShipping = normalizeAddress(shippingAddress, fallback)
+    const normalizedBilling = normalizeAddress(billingAddress, fallback) || normalizedShipping
+
+    if (!isAddressComplete(normalizedShipping)) {
+      return res.status(400).json({ success: false, message: 'Shipping address incomplete: name, street, city, state, zipCode, country are required.' })
+    }
+
     // Generate order ID
     const orderCount = await Order.countDocuments();
     const orderId = `ORD-${new Date().getFullYear()}-${String(orderCount + 1).padStart(4, '0')}`;
@@ -279,8 +300,8 @@ const createOrder = asyncHandler(async (req, res) => {
       tax,
       total,
       paymentMethod,
-      shippingAddress,
-      billingAddress: billingAddress || shippingAddress,
+      shippingAddress: normalizedShipping,
+      billingAddress: normalizedBilling,
       customerInfo: customerInfo || {
         name: req.user.name,
         email: req.user.email,
@@ -447,5 +468,232 @@ module.exports = {
   createOrder,
   updateOrderStatus,
   cancelOrder,
-  refundOrder
-};
+  refundOrder,
+}
+
+// --- Stripe Integration ---
+
+// Helper to compute shipping consistent with frontend
+function computeShipping(subtotal, shippingMethod) {
+  if (shippingMethod === 'express') return 15.99
+  if (shippingMethod === 'overnight') return 29.99
+  // standard
+  return subtotal > 100 ? 0 : 9.99
+}
+
+// Build order items and totals (shared by order creators)
+async function buildItemsAndTotals(items, shippingMethod) {
+  let subtotal = 0
+  const orderItems = []
+
+  for (const item of items) {
+    const perfume = await Perfume.findById(item.productId)
+    if (!perfume) {
+      const err = new Error(`Perfume ${item.productId} not found`)
+      err.statusCode = 404
+      throw err
+    }
+    const itemTotal = perfume.price * item.quantity
+    subtotal += itemTotal
+    orderItems.push({
+      productId: perfume._id,
+      name: perfume.name,
+      price: perfume.price,
+      quantity: item.quantity,
+      color: item.color,
+      size: item.size || perfume.size,
+      image: perfume.image,
+    })
+  }
+
+  const shipping = computeShipping(subtotal, shippingMethod)
+  const tax = subtotal * 0.08
+  const total = subtotal + shipping + tax
+  return { orderItems, subtotal, shipping, tax, total }
+}
+
+// Normalize address payload coming from client to match addressSchema
+function normalizeAddress(addr, fallback = {}) {
+  if (!addr || typeof addr !== 'object') return null
+  const nameFromParts = [addr.firstName, addr.lastName].filter(Boolean).join(' ')
+  const normalized = {
+    name: addr.name || nameFromParts || fallback.name,
+    street: addr.street || addr.address,
+    city: addr.city || fallback.city,
+    state: addr.state || fallback.state,
+    zipCode: addr.zipCode || addr.postalCode || addr.zip,
+    country: addr.country || fallback.country,
+    phone: addr.phone || fallback.phone,
+  }
+  return normalized
+}
+
+function isAddressComplete(a) {
+  return !!(a && a.name && a.street && a.city && a.state && a.zipCode && a.country)
+}
+
+// Create a unique, human-readable orderId field
+async function generateReadableOrderId() {
+  const orderCount = await Order.countDocuments()
+  return `ORD-${new Date().getFullYear()}-${String(orderCount + 1).padStart(4, '0')}`
+}
+
+// @desc    Create Stripe PaymentIntent and pending order
+// @route   POST /api/v1/orders/stripe/create-payment-intent
+// @access  Private
+const createStripePaymentIntent = asyncHandler(async (req, res) => {
+  if (!stripe) {
+    return res.status(500).json({ success: false, message: 'Stripe not configured' })
+  }
+
+  const {
+    items,
+    shippingAddress,
+    billingAddress,
+    paymentMethod = 'stripe',
+    customerInfo,
+    notes,
+    shippingMethod = 'standard',
+  } = req.body || {}
+
+  if (!items || !items.length) {
+    return res.status(400).json({ success: false, message: 'No order items provided' })
+  }
+
+  // Build items and totals
+  const { orderItems, subtotal, shipping, tax, total } = await buildItemsAndTotals(items, shippingMethod)
+
+  // Normalize addresses to match schema
+  const fallback = { name: customerInfo?.name || req.user.name, phone: customerInfo?.phone || req.user.phone }
+  const normalizedShipping = normalizeAddress(shippingAddress, fallback)
+  const normalizedBilling = normalizeAddress(billingAddress, fallback) || normalizedShipping
+
+  if (!isAddressComplete(normalizedShipping)) {
+    return res.status(400).json({ success: false, message: 'Shipping address incomplete: name, street, city, state, zipCode, country are required.' })
+  }
+
+  // Create PaymentIntent in cents
+  const amount = Math.round(total * 100)
+  const readableOrderId = await generateReadableOrderId()
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount,
+    currency: 'usd',
+    automatic_payment_methods: { enabled: true },
+    metadata: {
+      orderId: readableOrderId,
+      userId: req.user.id,
+    },
+  })
+
+  // Create pending order linked to PaymentIntent
+  const order = await Order.create({
+    orderId: readableOrderId,
+    userId: req.user.id,
+    items: orderItems,
+    subtotal,
+    shipping,
+    tax,
+    total,
+    paymentMethod,
+    paymentStatus: 'pending',
+    paymentId: paymentIntent.id,
+    shippingAddress: normalizedShipping,
+    billingAddress: normalizedBilling,
+    customerInfo: customerInfo || {
+      name: req.user.name,
+      email: req.user.email,
+      phone: req.user.phone,
+    },
+    notes,
+    status: 'pending',
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      clientSecret: paymentIntent.client_secret,
+      orderId: order._id,
+      readableOrderId,
+      amount,
+    },
+    message: 'Payment intent created',
+  })
+})
+
+// @desc    Stripe webhook handler
+// @route   POST /api/v1/stripe/webhook (raw body)
+// @access  Public (Stripe only)
+async function handleStripeWebhook(req, res) {
+  if (!stripe) {
+    return res.status(500).send('Stripe not configured')
+  }
+
+  const sig = req.headers['stripe-signature']
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+  if (!webhookSecret) {
+    return res.status(500).send('Webhook secret not configured')
+  }
+
+  let event
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret)
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`)
+  }
+
+  try {
+    switch (event.type) {
+      case 'payment_intent.succeeded': {
+        const pi = event.data.object
+        const order = await Order.findOne({ paymentId: pi.id })
+        if (order) {
+          order.paymentStatus = 'paid'
+          // Move to processing once paid
+          order.status = order.status === 'pending' ? 'processing' : order.status
+          await order.save()
+          // Clear user cart
+          try { await Cart.findOneAndUpdate({ user: order.userId }, { $set: { items: [] } }) } catch (_) {}
+          // Emit realtime update
+          try {
+            const io = getIO()
+            io.to(`order:${order._id}`).emit('order:payment_update', {
+              orderId: String(order._id),
+              paymentStatus: order.paymentStatus,
+              status: order.status,
+            })
+          } catch (_) {}
+        }
+        break
+      }
+      case 'payment_intent.payment_failed': {
+        const pi = event.data.object
+        const order = await Order.findOne({ paymentId: pi.id })
+        if (order) {
+          order.paymentStatus = 'failed'
+          await order.save()
+          try {
+            const io = getIO()
+            io.to(`order:${order._id}`).emit('order:payment_update', {
+              orderId: String(order._id),
+              paymentStatus: order.paymentStatus,
+              status: order.status,
+            })
+          } catch (_) {}
+        }
+        break
+      }
+      default:
+        // ignore other events for now
+        break
+    }
+
+    res.status(200).json({ received: true })
+  } catch (err) {
+    res.status(500).send(`Webhook handler error: ${err.message}`)
+  }
+}
+
+// Export new handlers in addition to previous ones
+module.exports.createStripePaymentIntent = createStripePaymentIntent
+module.exports.handleStripeWebhook = handleStripeWebhook

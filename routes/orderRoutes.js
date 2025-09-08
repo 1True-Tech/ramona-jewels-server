@@ -6,7 +6,9 @@ const {
   updateOrderStatus,
   cancelOrder,
   refundOrder,
-  createOrder
+  createOrder,
+  createStripePaymentIntent,
+  handleStripeWebhook,
 } = require('../controllers/orderController');
 const { protect, authorize } = require('../middlewares/auth');
 
@@ -127,6 +129,10 @@ router.get('/:id', protect, getOrderById);
  *         description: Bad request
  */
 router.post('/', protect, createOrder);
+
+// Stripe routes
+router.post('/stripe/create-payment-intent', protect, createStripePaymentIntent);
+// Webhook must be mounted at app level with raw body; fallback here if mounted under /api/v1/orders
 
 /**
  * @swagger

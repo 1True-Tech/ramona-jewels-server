@@ -16,6 +16,14 @@ function init(server) {
     socket.on('leave_product', (productId) => {
       if (productId) socket.leave(`product:${productId}`);
     });
+
+    // Clients can join order rooms to receive payment/status updates for a particular order
+    socket.on('join_order', (orderId) => {
+      if (orderId) socket.join(`order:${orderId}`);
+    });
+    socket.on('leave_order', (orderId) => {
+      if (orderId) socket.leave(`order:${orderId}`);
+    });
   });
   return io;
 }
@@ -25,4 +33,10 @@ function getIO() {
   return io;
 }
 
-module.exports = { init, getIO };
+// Helper to emit order payment updates
+function emitOrderPaymentUpdate(orderId, payload) {
+  if (!io) return;
+  io.to(`order:${orderId}`).emit('order:payment_update', payload);
+}
+
+module.exports = { init, getIO, emitOrderPaymentUpdate };

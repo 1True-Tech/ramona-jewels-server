@@ -21,6 +21,15 @@ const analytics = require('./routes/analyticsRoutes');
 
 const app = express();
 
+// Stripe webhook - mount BEFORE any body parser so we can access raw body
+try {
+  const bodyParser = require('body-parser');
+  const { handleStripeWebhook } = require('./controllers/orderController');
+  app.post('/api/v1/stripe/webhook', bodyParser.raw({ type: 'application/json' }), handleStripeWebhook);
+} catch (_) {
+  // body-parser or handler not available; ignore
+}
+
 // Body parser
 app.use(express.json());
 
