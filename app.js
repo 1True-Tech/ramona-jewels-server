@@ -6,6 +6,7 @@ const cookieParser = require('cookie-parser');
 const fileupload = require('express-fileupload');
 const errorHandler = require('./middlewares/error');
 const setupSwagger = require('./config/swagger'); // Add this line
+const reviews = require('./routes/reviewRoutes');
 
 // Route files
 const auth = require('./routes/authRoutes');
@@ -53,6 +54,7 @@ app.use('/api/v1/cart', cart);
 app.use('/api/v1/admin', admin);
 app.use('/api/v1/orders', orders);
 app.use('/api/v1/admin/analytics', analytics);
+app.use('/api/v1', reviews);
 
 // Error handler
 app.use(errorHandler);
