@@ -37,12 +37,16 @@ exports.updateProductType = asyncHandler(async (req, res, next) => {
   res.status(200).json({ success: true, data: type });
 });
 
-// @desc    Delete product type (prevents delete if categories exist)
+// @desc    Delete product type (also deletes its categories)
 // @route   DELETE /api/v1/product-types/:id
 // @access  Private/Admin
 exports.deleteProductType = asyncHandler(async (req, res, next) => {
-  const hasCategories = await Category.exists({ productType: req.params.id });
-  if (hasCategories) return next(new ErrorResponse('Cannot delete product type with existing categories', 400));
+  const type = await ProductType.findById(req.params.id);
+  if (!type) return next(new ErrorResponse('Product type not found', 404));
+
+  // Cascade delete: remove all categories linked to this product type first
+  const { deletedCount } = await Category.deleteMany({ productType: req.params.id });
+
   await ProductType.findByIdAndDelete(req.params.id);
-  res.status(200).json({ success: true, data: {} });
+  res.status(200).json({ success: true, message: `Product type deleted. Removed ${deletedCount} categories.`, data: {} });
 });
