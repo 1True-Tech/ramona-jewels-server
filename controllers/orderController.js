@@ -3,7 +3,8 @@ const Perfume = require('../models/Products');
 const User = require('../models/User');
 const Cart = require('../models/Cart');
 const asyncHandler = require('express-async-handler');
-const { getIO } = require('../config/socket');
+const { emitAnalyticsUpdate, emitOrderPaymentUpdate } = require('../config/socket');
+const { computeAnalyticsSnapshot } = require('./analyticsController');
 
 // Stripe setup
 let stripe = null
@@ -318,6 +319,12 @@ const createOrder = asyncHandler(async (req, res) => {
       { $set: { items: [] } }
     );
 
+    // Emit analytics snapshot after order creation
+    try {
+      const snapshot = await computeAnalyticsSnapshot();
+      emitAnalyticsUpdate(snapshot);
+    } catch (_) {}
+
     res.status(201).json({
       success: true,
       data: order,
@@ -357,6 +364,12 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
       updateData,
       { new: true }
     );
+
+    // Emit analytics snapshot after status update
+    try {
+      const snapshot = await computeAnalyticsSnapshot();
+      emitAnalyticsUpdate(snapshot);
+    } catch (_) {}
 
     res.json({
       success: true,
@@ -406,6 +419,12 @@ const cancelOrder = asyncHandler(async (req, res) => {
     order.paymentStatus = 'refunded';
     await order.save();
 
+    // Emit analytics snapshot after cancellation
+    try {
+      const snapshot = await computeAnalyticsSnapshot();
+      emitAnalyticsUpdate(snapshot);
+    } catch (_) {}
+
     res.json({
       success: true,
       data: order,
@@ -446,6 +465,12 @@ const refundOrder = asyncHandler(async (req, res) => {
     };
 
     await order.save();
+
+    // Emit analytics snapshot after refund
+    try {
+      const snapshot = await computeAnalyticsSnapshot();
+      emitAnalyticsUpdate(snapshot);
+    } catch (_) {}
 
     res.json({
       success: true,
@@ -654,14 +679,18 @@ async function handleStripeWebhook(req, res) {
           await order.save()
           // Clear user cart
           try { await Cart.findOneAndUpdate({ user: order.userId }, { $set: { items: [] } }) } catch (_) {}
-          // Emit realtime update
+          // Emit realtime order payment update using helper
           try {
-            const io = getIO()
-            io.to(`order:${order._id}`).emit('order:payment_update', {
+            emitOrderPaymentUpdate(String(order._id), {
               orderId: String(order._id),
               paymentStatus: order.paymentStatus,
               status: order.status,
             })
+          } catch (_) {}
+          // Emit analytics snapshot after payment success
+          try {
+            const snapshot = await computeAnalyticsSnapshot();
+            emitAnalyticsUpdate(snapshot);
           } catch (_) {}
         }
         break
@@ -673,12 +702,16 @@ async function handleStripeWebhook(req, res) {
           order.paymentStatus = 'failed'
           await order.save()
           try {
-            const io = getIO()
-            io.to(`order:${order._id}`).emit('order:payment_update', {
+            emitOrderPaymentUpdate(String(order._id), {
               orderId: String(order._id),
               paymentStatus: order.paymentStatus,
               status: order.status,
             })
+          } catch (_) {}
+          // Emit analytics snapshot after payment failure
+          try {
+            const snapshot = await computeAnalyticsSnapshot();
+            emitAnalyticsUpdate(snapshot);
           } catch (_) {}
         }
         break

@@ -106,6 +106,54 @@ const getAnalyticsDashboard = asyncHandler(async (req, res) => {
       }
     ]);
 
+    // Payment status breakdown and trends
+    const __now = new Date();
+    const __currStart = startDate ? new Date(startDate) : new Date(__now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const __currEnd = endDate ? new Date(endDate) : __now;
+    const __period = Math.max(1, __currEnd.getTime() - __currStart.getTime());
+    const __prevStart = new Date(__currStart.getTime() - __period);
+    const __prevEnd = __currStart;
+
+    const __statusAggCurrent = await Order.aggregate([
+      { $match: { createdAt: { $gte: __currStart, $lte: __currEnd }, status: { $ne: 'cancelled' } } },
+      { $group: { _id: '$paymentStatus', amount: { $sum: '$total' }, count: { $sum: 1 } } }
+    ]);
+
+    const __statusAggPrev = await Order.aggregate([
+      { $match: { createdAt: { $gte: __prevStart, $lte: __prevEnd }, status: { $ne: 'cancelled' } } },
+      { $group: { _id: '$paymentStatus', amount: { $sum: '$total' }, count: { $sum: 1 } } }
+    ]);
+
+    const __init = { paid: { amount: 0, count: 0 }, pending: { amount: 0, count: 0 }, failed: { amount: 0, count: 0 }, refunded: { amount: 0, count: 0 } };
+    const __toMap = (agg) => agg.reduce((a, i) => { a[i._id] = { amount: i.amount, count: i.count }; return a; }, { ...__init });
+
+    const __curr = __toMap(__statusAggCurrent);
+    const __prev = __toMap(__statusAggPrev);
+
+    var __totalPaidRevenue = __curr.paid.amount || 0;
+    var __totalPaidCount = __curr.paid.count || 0;
+    var __pendingCount = __curr.pending.count || 0;
+    var __failedCount = __curr.failed.count || 0;
+    var __refundedCount = __curr.refunded.count || 0;
+
+    const __prevPaidRevenue = __prev.paid.amount || 0;
+    var __paidRevenueGrowth = __prevPaidRevenue > 0 ? ((__totalPaidRevenue - __prevPaidRevenue) / __prevPaidRevenue) * 100 : 0;
+
+    const __pct = (c, p) => (p > 0 ? ((c - p) / p) * 100 : 0);
+    var __statusTrends = {
+      paid: __pct(__totalPaidCount, __prev.paid.count || 0),
+      pending: __pct(__pendingCount, __prev.pending.count || 0),
+      failed: __pct(__failedCount, __prev.failed.count || 0),
+      refunded: __pct(__refundedCount, __prev.refunded.count || 0),
+    };
+
+    var __paymentStatusBreakdown = [
+      { status: 'paid', amount: __totalPaidRevenue, count: __totalPaidCount },
+      { status: 'pending', amount: __curr.pending.amount || 0, count: __pendingCount },
+      { status: 'failed', amount: __curr.failed.amount || 0, count: __failedCount },
+      { status: 'refunded', amount: __curr.refunded.amount || 0, count: __refundedCount },
+    ];
+
     res.json({
       success: true,
       data: {
@@ -239,6 +287,120 @@ const getSalesData = asyncHandler(async (req, res) => {
   }
 });
 
+// Reusable helpers for realtime analytics
+async function computePaymentStatusMetrics({ startDate, endDate } = {}) {
+  const now = new Date();
+  const currStart = startDate ? new Date(startDate) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const currEnd = endDate ? new Date(endDate) : now;
+  const periodMs = Math.max(1, currEnd.getTime() - currStart.getTime());
+  const prevStart = new Date(currStart.getTime() - periodMs);
+  const prevEnd = currStart;
+
+  const statusAggCurrent = await Order.aggregate([
+    { $match: { createdAt: { $gte: currStart, $lte: currEnd }, status: { $ne: 'cancelled' } } },
+    { $group: { _id: '$paymentStatus', amount: { $sum: '$total' }, count: { $sum: 1 } } }
+  ]);
+  const statusAggPrev = await Order.aggregate([
+    { $match: { createdAt: { $gte: prevStart, $lte: prevEnd }, status: { $ne: 'cancelled' } } },
+    { $group: { _id: '$paymentStatus', amount: { $sum: '$total' }, count: { $sum: 1 } } }
+  ]);
+
+  const init = { paid: { amount: 0, count: 0 }, pending: { amount: 0, count: 0 }, failed: { amount: 0, count: 0 }, refunded: { amount: 0, count: 0 } };
+  const toMap = (agg) => agg.reduce((a, i) => { a[i._id] = { amount: i.amount, count: i.count }; return a; }, { ...init });
+  const curr = toMap(statusAggCurrent);
+  const prev = toMap(statusAggPrev);
+
+  const totalPaidRevenue = curr.paid.amount || 0;
+  const totalPaidCount = curr.paid.count || 0;
+  const pendingCount = curr.pending.count || 0;
+  const failedCount = curr.failed.count || 0;
+  const refundedCount = curr.refunded.count || 0;
+  const prevPaidRevenue = prev.paid.amount || 0;
+  const paidRevenueGrowth = prevPaidRevenue > 0 ? ((totalPaidRevenue - prevPaidRevenue) / prevPaidRevenue) * 100 : 0;
+  const pct = (c, p) => (p > 0 ? ((c - p) / p) * 100 : 0);
+  const statusTrends = {
+    paid: pct(totalPaidCount, prev.paid.count || 0),
+    pending: pct(pendingCount, prev.pending.count || 0),
+    failed: pct(failedCount, prev.failed.count || 0),
+    refunded: pct(refundedCount, prev.refunded.count || 0),
+  };
+  const paymentStatusBreakdown = [
+    { status: 'paid', amount: totalPaidRevenue, count: totalPaidCount },
+    { status: 'pending', amount: curr.pending.amount || 0, count: pendingCount },
+    { status: 'failed', amount: curr.failed.amount || 0, count: failedCount },
+    { status: 'refunded', amount: curr.refunded.amount || 0, count: refundedCount },
+  ];
+
+  return { totalPaidRevenue, totalPaidCount, pendingCount, failedCount, refundedCount, paidRevenueGrowth, paymentStatusBreakdown, statusTrends };
+}
+
+async function computeAnalyticsSnapshot({ startDate, endDate } = {}) {
+  let dateFilter = {};
+  if (startDate || endDate) {
+    dateFilter.createdAt = {};
+    if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
+    if (endDate) dateFilter.createdAt.$lte = new Date(endDate);
+  }
+
+  const revenueResult = await Order.aggregate([
+    { $match: { ...dateFilter, status: { $ne: 'cancelled' } } },
+    { $group: { _id: null, totalRevenue: { $sum: '$total' } } }
+  ]);
+  const totalRevenue = revenueResult[0]?.totalRevenue || 0;
+  const totalOrders = await Order.countDocuments({ ...dateFilter, status: { $ne: 'cancelled' } });
+  const totalCustomers = await User.countDocuments({ ...dateFilter, role: 'user' });
+  const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+  const conversionRate = 2.5;
+
+  const now = new Date();
+  const currStart = startDate ? new Date(startDate) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const currEnd = endDate ? new Date(endDate) : now;
+  const periodMs = Math.max(1, currEnd.getTime() - currStart.getTime());
+  const prevStart = new Date(currStart.getTime() - periodMs);
+  const prevEnd = currStart;
+  const prevRevenueResult = await Order.aggregate([
+    { $match: { createdAt: { $gte: prevStart, $lte: prevEnd }, status: { $ne: 'cancelled' } } },
+    { $group: { _id: null, totalRevenue: { $sum: '$total' } } }
+  ]);
+  const previousRevenue = prevRevenueResult[0]?.totalRevenue || 0;
+  const previousOrders = await Order.countDocuments({ createdAt: { $gte: prevStart, $lte: prevEnd }, status: { $ne: 'cancelled' } });
+  const revenueGrowth = previousRevenue > 0 ? ((totalRevenue - previousRevenue) / previousRevenue) * 100 : 0;
+  const ordersGrowth = previousOrders > 0 ? ((totalOrders - previousOrders) / previousOrders) * 100 : 0;
+
+  const topProducts = await Order.aggregate([
+    { $match: { ...dateFilter, status: { $ne: 'cancelled' } } },
+    { $unwind: '$items' },
+    { $group: { _id: '$items.productId', name: { $first: '$items.name' }, sales: { $sum: '$items.quantity' }, revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } } } },
+    { $sort: { revenue: -1 } },
+    { $limit: 5 }
+  ]);
+
+  const payment = await computePaymentStatusMetrics({ startDate, endDate });
+
+  return {
+    revenue: {
+      totalRevenue,
+      monthlyRevenue: totalRevenue,
+      yearlyRevenue: totalRevenue,
+      revenueGrowth,
+      ordersGrowth,
+      averageOrderValue,
+      totalOrders,
+      conversionRate,
+      ...payment,
+    },
+    customers: {
+      totalCustomers,
+      newCustomers: Math.floor(totalCustomers * 0.3),
+      returningCustomers: Math.floor(totalCustomers * 0.7),
+      averageOrderValue,
+      customerLifetimeValue: averageOrderValue * 3,
+      topCustomers: []
+    },
+    products: topProducts,
+  };
+}
+
 // @desc    Get revenue metrics
 // @route   GET /api/admin/analytics/revenue
 // @access  Private/Admin
@@ -253,75 +415,51 @@ const getRevenueMetrics = asyncHandler(async (req, res) => {
       if (endDate) dateFilter.createdAt.$lte = new Date(endDate);
     }
 
-    // Total revenue
     const revenueResult = await Order.aggregate([
       { $match: { ...dateFilter, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: '$total' },
-          totalOrders: { $sum: 1 },
-          averageOrderValue: { $avg: '$total' },
-          totalShipping: { $sum: '$shipping' },
-          totalTax: { $sum: '$tax' },
-          totalDiscount: { $sum: '$discount' }
-        }
-      }
+      { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalOrders: { $sum: 1 }, averageOrderValue: { $avg: '$total' }, totalShipping: { $sum: '$shipping' }, totalTax: { $sum: '$tax' }, totalDiscount: { $sum: '$discount' } } }
     ]);
 
-    const metrics = revenueResult[0] || {
-      totalRevenue: 0,
-      totalOrders: 0,
-      averageOrderValue: 0,
-      totalShipping: 0,
-      totalTax: 0,
-      totalDiscount: 0
-    };
+    const metrics = revenueResult[0] || { totalRevenue: 0, totalOrders: 0, averageOrderValue: 0, totalShipping: 0, totalTax: 0, totalDiscount: 0 };
 
-    // Revenue by payment method
     const revenueByPayment = await Order.aggregate([
       { $match: { ...dateFilter, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: '$paymentMethod',
-          revenue: { $sum: '$total' },
-          orders: { $sum: 1 }
-        }
-      }
+      { $group: { _id: '$paymentMethod', revenue: { $sum: '$total' }, orders: { $sum: 1 } } }
     ]);
 
-    // Monthly recurring revenue (for subscription-like analysis)
     const monthlyRevenue = await Order.aggregate([
       { $match: { ...dateFilter, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' }
-          },
-          revenue: { $sum: '$total' }
-        }
-      },
+      { $group: { _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } }, revenue: { $sum: '$total' } } },
       { $sort: { '_id.year': 1, '_id.month': 1 } }
     ]);
+
+    const now = new Date();
+    const currStart = startDate ? new Date(startDate) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const currEnd = endDate ? new Date(endDate) : now;
+    const periodMs = Math.max(1, currEnd.getTime() - currStart.getTime());
+    const prevStart = new Date(currStart.getTime() - periodMs);
+    const prevEnd = currStart;
+    const prevRevenueAgg = await Order.aggregate([
+      { $match: { createdAt: { $gte: prevStart, $lte: prevEnd }, status: { $ne: 'cancelled' } } },
+      { $group: { _id: null, totalRevenue: { $sum: '$total' } } }
+    ]);
+    const previousRevenue = prevRevenueAgg[0]?.totalRevenue || 0;
+    const revenueGrowth = previousRevenue > 0 ? ((metrics.totalRevenue - previousRevenue) / previousRevenue) * 100 : 0;
+
+    const payment = await computePaymentStatusMetrics({ startDate, endDate });
 
     res.json({
       success: true,
       data: {
         ...metrics,
+        revenueGrowth,
         revenueByPaymentMethod: revenueByPayment,
-        monthlyRevenue: monthlyRevenue.map(item => ({
-          month: `${item._id.year}-${String(item._id.month).padStart(2, '0')}`,
-          revenue: item.revenue
-        }))
+        monthlyRevenue: monthlyRevenue.map(item => ({ month: `${item._id.year}-${String(item._id.month).padStart(2, '0')}`, revenue: item.revenue })),
+        ...payment,
       }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching revenue metrics',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error fetching revenue metrics', error: error.message });
   }
 });
 
@@ -681,5 +819,8 @@ module.exports = {
   getCategoryPerformance,
   getCustomerInsights,
   getInventoryInsights,
-  getTrafficData
+  getTrafficData,
+  computeAnalyticsSnapshot,
+  // optionally export for reuse if needed elsewhere
+  computePaymentStatusMetrics,
 };

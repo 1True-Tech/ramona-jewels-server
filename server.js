@@ -4,7 +4,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = require('./app');
 const connectDB = require('./config/db');
-const { init } = require('./config/socket');
+const { initSocket } = require('./config/socket');
 
 // Connect to database
 connectDB();
@@ -16,7 +16,7 @@ const server = app.listen(PORT, () => {
 });
 
 // Initialize Socket.IO
-init(server);
+initSocket(server);
 
 // Error handling
 process.on('unhandledRejection', (err) => {

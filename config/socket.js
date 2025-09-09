@@ -1,30 +1,43 @@
+const { Server } = require('socket.io');
+
 let io;
 
-function init(server) {
-  const { Server } = require('socket.io');
+function initSocket(server) {
   io = new Server(server, {
     cors: {
-      origin: '*',
+      origin: process.env.CLIENT_URL || '*',
       methods: ['GET', 'POST']
     }
   });
+
   io.on('connection', (socket) => {
-    // Clients can join product rooms to receive updates for a particular product
+    // Existing rooms
     socket.on('join_product', (productId) => {
-      if (productId) socket.join(`product:${productId}`);
-    });
-    socket.on('leave_product', (productId) => {
-      if (productId) socket.leave(`product:${productId}`);
+      socket.join(`product_${productId}`);
     });
 
-    // Clients can join order rooms to receive payment/status updates for a particular order
-    socket.on('join_order', (orderId) => {
-      if (orderId) socket.join(`order:${orderId}`);
+    socket.on('leave_product', (productId) => {
+      socket.leave(`product_${productId}`);
     });
+
+    socket.on('join_order', (orderId) => {
+      socket.join(`order_${orderId}`);
+    });
+
     socket.on('leave_order', (orderId) => {
-      if (orderId) socket.leave(`order:${orderId}`);
+      socket.leave(`order_${orderId}`);
+    });
+
+    // New: analytics room for admin dashboard
+    socket.on('join_analytics', () => {
+      socket.join('analytics');
+    });
+
+    socket.on('leave_analytics', () => {
+      socket.leave('analytics');
     });
   });
+
   return io;
 }
 
@@ -33,10 +46,21 @@ function getIO() {
   return io;
 }
 
-// Helper to emit order payment updates
+// Existing emitter examples
 function emitOrderPaymentUpdate(orderId, payload) {
   if (!io) return;
-  io.to(`order:${orderId}`).emit('order:payment_update', payload);
+  io.to(`order_${orderId}`).emit('order_payment_update', payload);
 }
 
-module.exports = { init, getIO, emitOrderPaymentUpdate };
+// New: analytics update emitter
+function emitAnalyticsUpdate(payload) {
+  if (!io) return;
+  io.to('analytics').emit('analytics_update', payload);
+}
+
+module.exports = {
+  initSocket,
+  getIO,
+  emitOrderPaymentUpdate,
+  emitAnalyticsUpdate,
+};
