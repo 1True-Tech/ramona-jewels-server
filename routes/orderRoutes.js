@@ -11,6 +11,9 @@ const {
   handleStripeWebhook,
 } = require('../controllers/orderController');
 const { protect, authorize } = require('../middlewares/auth');
+// Add asyncHandler and Order model for the user-specific orders endpoint
+const asyncHandler = require('express-async-handler');
+const Order = require('../models/Order');
 
 const router = express.Router();
 
@@ -60,171 +63,90 @@ const router = express.Router();
  */
 router.get('/', protect, authorize('admin'), getAllOrders);
 
-/**
- * @swagger
- * /orders/stats:
- *   get:
- *     summary: Get order statistics (Admin only)
- *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Order statistics
- *       401:
- *         description: Unauthorized
- *       403:
- *         description: Forbidden
- */
-router.get('/stats', protect, authorize('admin'), getOrderStats);
+// User-specific orders endpoint (must be before '/:id')
+router.get('/my-orders', protect, asyncHandler(async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const skip = (page - 1) * limit;
+  const search = req.query.search || '';
+  const status = req.query.status;
+  const startDate = req.query.startDate;
+  const endDate = req.query.endDate;
 
-/**
- * @swagger
- * /orders/{id}:
- *   get:
- *     summary: Get order by ID
- *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *         description: Order ID
- *     responses:
- *       200:
- *         description: Order details
- *       404:
- *         description: Order not found
- */
+  // Build query for current user
+  const query = { userId: req.user.id };
+
+  if (search) {
+    query.$or = [
+      { orderId: { $regex: search, $options: 'i' } },
+      { 'items.name': { $regex: search, $options: 'i' } },
+    ];
+  }
+
+  if (status && status !== 'all') {
+    query.status = status;
+  }
+
+  if (startDate || endDate) {
+    query.createdAt = {};
+    if (startDate) query.createdAt.$gte = new Date(startDate);
+    if (endDate) query.createdAt.$lte = new Date(endDate);
+  }
+
+  try {
+    const total = await Order.countDocuments(query);
+    const orders = await Order.find(query)
+      .populate('userId', 'name email')
+      .populate('items.productId', 'name price image category')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const transformedOrders = orders.map(order => ({
+      id: order._id,
+      userId: order.userId?._id,
+      customerName: order.customerInfo?.name || order.userId?.name,
+      customerEmail: order.customerInfo?.email || order.userId?.email,
+      customerPhone: order.customerInfo?.phone,
+      status: order.status,
+      items: order.items.map(item => ({
+        id: item._id,
+        productId: item.productId?._id,
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        color: item.color,
+        size: item.size,
+        image: item.productId?.image || item.image
+      })),
+      subtotal: order.subtotal,
+      shipping: order.shipping,
+      tax: order.tax,
+      discount: order.discount,
+      total: order.total,
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+      shippingAddress: order.shippingAddress,
+      billingAddress: order.billingAddress,
+      trackingNumber: order.trackingNumber,
+      notes: order.notes,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt
+    }));
+
+    res.json({ success: true, data: transformedOrders, total, page, pages: Math.ceil(total / limit) });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error fetching orders', error: error.message });
+  }
+}));
+
+router.get('/stats', protect, authorize('admin'), getOrderStats);
 router.get('/:id', protect, getOrderById);
 
-/**
- * @swagger
- * /orders:
- *   post:
- *     summary: Create new order
- *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               items:
- *                 type: array
- *               shippingAddress:
- *                 type: object
- *               paymentMethod:
- *                 type: string
- *     responses:
- *       201:
- *         description: Order created successfully
- *       400:
- *         description: Bad request
- */
 router.post('/', protect, createOrder);
-
-// Stripe routes
 router.post('/stripe/create-payment-intent', protect, createStripePaymentIntent);
-// Webhook must be mounted at app level with raw body; fallback here if mounted under /api/v1/orders
-
-/**
- * @swagger
- * /orders/{id}/status:
- *   patch:
- *     summary: Update order status (Admin only)
- *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *         description: Order ID
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               status:
- *                 type: string
- *               trackingNumber:
- *                 type: string
- *               notes:
- *                 type: string
- *     responses:
- *       200:
- *         description: Order status updated
- *       404:
- *         description: Order not found
- */
 router.patch('/:id/status', protect, authorize('admin'), updateOrderStatus);
-
-/**
- * @swagger
- * /orders/{id}/cancel:
- *   patch:
- *     summary: Cancel order
- *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *         description: Order ID
- *     responses:
- *       200:
- *         description: Order cancelled
- *       404:
- *         description: Order not found
- */
 router.patch('/:id/cancel', protect, cancelOrder);
-
-/**
- * @swagger
- * /orders/{id}/refund:
- *   post:
- *     summary: Refund order (Admin only)
- *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *         description: Order ID
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               amount:
- *                 type: number
- *               reason:
- *                 type: string
- *     responses:
- *       200:
- *         description: Order refunded
- *       404:
- *         description: Order not found
- */
 router.post('/:id/refund', protect, authorize('admin'), refundOrder);
 
 module.exports = router;
