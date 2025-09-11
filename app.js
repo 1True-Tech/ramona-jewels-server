@@ -63,6 +63,7 @@ app.use('/api/v1/cart', cart);
 app.use('/api/v1/admin', admin);
 app.use('/api/v1/orders', orders);
 app.use('/api/v1/admin/analytics', analytics);
+app.use('/api/v1/returns', require('./routes/returnRoutes'));
 app.use('/api/v1', reviews);
 
 // Error handler

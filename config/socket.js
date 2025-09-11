@@ -36,6 +36,15 @@ function initSocket(server) {
     socket.on('leave_analytics', () => {
       socket.leave('analytics');
     });
+
+    // New: returns room per return request
+    socket.on('join_return', (returnId) => {
+      socket.join(`return_${returnId}`);
+    });
+
+    socket.on('leave_return', (returnId) => {
+      socket.leave(`return_${returnId}`);
+    });
   });
 
   return io;
@@ -58,9 +67,16 @@ function emitAnalyticsUpdate(payload) {
   io.to('analytics').emit('analytics_update', payload);
 }
 
+// New: return request update emitter
+function emitReturnUpdate(returnId, payload) {
+  if (!io) return;
+  io.to(`return_${returnId}`).emit('return_update', payload);
+}
+
 module.exports = {
   initSocket,
   getIO,
   emitOrderPaymentUpdate,
   emitAnalyticsUpdate,
+  emitReturnUpdate,
 };
