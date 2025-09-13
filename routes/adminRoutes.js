@@ -10,6 +10,8 @@ const {
 } = require('../controllers/adminController');
 
 const { protect, authorize } = require('../middlewares/auth');
+// Add settings controller handlers
+const { getSettings, updateSettings } = require('../controllers/settingsController');
 
 const router = express.Router();
 
@@ -36,5 +38,10 @@ router.route('/users/:id/status')
 
 router.route('/users/:id/role')
   .patch(updateUserRole);
+
+// Settings routes
+router.route('/settings')
+  .get(getSettings)
+  .patch(updateSettings);
 
 module.exports = router;

@@ -571,6 +571,17 @@ const createStripePaymentIntent = asyncHandler(async (req, res) => {
     return res.status(500).json({ success: false, message: 'Stripe not configured' })
   }
 
+  // Enforce settings: Stripe payments must be enabled
+  try {
+    const Settings = require('../models/Settings');
+    const settings = await Settings.getSingleton();
+    if (!settings?.payments?.stripe?.enabled) {
+      return res.status(403).json({ success: false, message: 'Stripe payments are currently disabled by admin' });
+    }
+  } catch (_) {
+    // If settings model not available, proceed (fails open)
+  }
+
   const {
     items,
     shippingAddress,
