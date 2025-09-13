@@ -241,13 +241,17 @@ const getSalesData = asyncHandler(async (req, res) => {
     }
 
     const salesData = await Order.aggregate([
-      { $match: { ...dateFilter, status: { $ne: 'cancelled' } } },
+      { $match: { ...dateFilter } },
       {
         $group: {
           _id: groupBy,
-          revenue: { $sum: '$total' },
-          orders: { $sum: 1 },
-          averageOrderValue: { $avg: '$total' }
+          // Exclude cancelled orders from core revenue/orders metrics
+          revenue: { $sum: { $cond: [{ $ne: ['$status', 'cancelled'] }, '$total', 0] } },
+          orders: { $sum: { $cond: [{ $ne: ['$status', 'cancelled'] }, 1, 0] } },
+          // Status-based sums for chart series
+          paid: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'paid'] }, '$total', 0] } },
+          pending: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'pending'] }, '$total', 0] } },
+          cancelled: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, '$total', 0] } },
         }
       },
       { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1, '_id.hour': 1 } }
@@ -270,7 +274,10 @@ const getSalesData = asyncHandler(async (req, res) => {
         date: date.toISOString(),
         revenue: item.revenue,
         orders: item.orders,
-        averageOrderValue: item.averageOrderValue
+        averageOrderValue: item.orders > 0 ? item.revenue / item.orders : 0,
+        paid: item.paid || 0,
+        pending: item.pending || 0,
+        cancelled: item.cancelled || 0,
       };
     });
 
