@@ -4,6 +4,8 @@ const asyncHandler = require('../utils/async');
 const sendTokenResponse = require('../utils/tokenResponse');
 const { OAuth2Client } = require('google-auth-library');
 const fetch = require('node-fetch');
+const bcrypt = require('bcryptjs');
+const nodemailer = require('nodemailer');
 
 // @desc    Register user
 // @route   POST /api/v1/auth/register
@@ -26,7 +28,7 @@ exports.register = asyncHandler(async (req, res, next) => {
 // @route   POST /api/v1/auth/google
 // @access  Public
 exports.googleLogin = asyncHandler(async (req, res, next) => {
-  const { idToken, clientId: clientIdFromBody } = req.body;
+  const { idToken, clientId: clientIdFromBody, mode } = req.body;
   const clientId = process.env.GOOGLE_CLIENT_ID || clientIdFromBody;
   if (!idToken || !clientId) {
     return next(new ErrorResponse('Missing Google token or client ID', 400));
@@ -45,6 +47,13 @@ exports.googleLogin = asyncHandler(async (req, res, next) => {
   const googleId = payload?.sub;
   if (!email) return next(new ErrorResponse('Google account has no email', 400));
 
+  // If this request is explicitly a signup and the email already exists, block and inform user
+  const existingByEmail = await User.findOne({ email });
+  if (mode === 'signup' && existingByEmail) {
+    return next(new ErrorResponse('Email already exists', 409));
+  }
+
+  // Proceed with normal google auth flow (sign in or create/link)
   let user = await User.findOne({ $or: [{ googleId }, { email }] });
   if (!user) {
     // Create OAuth user without password
@@ -81,7 +90,7 @@ exports.login = asyncHandler(async (req, res, next) => {
   const user = await User.findOne({ email }).select('+password +loginAttempts +lockUntil');
 
   if (!user) {
-    return next(new ErrorResponse('Invalid credentials', 401));
+    return next(new ErrorResponse('Email or password is incorrect', 401));
   }
 
   // Check if user account is locked
@@ -100,7 +109,7 @@ exports.login = asyncHandler(async (req, res, next) => {
   if (!isMatch) {
     // Increment login attempts
     await user.incLoginAttempts();
-    return next(new ErrorResponse('Invalid credentials', 401));
+    return next(new ErrorResponse('Email or password is incorrect', 401));
   }
 
   // Reset login attempts on successful login
@@ -244,4 +253,145 @@ exports.changePassword = asyncHandler(async (req, res, next) => {
   await user.save();
 
   sendTokenResponse(user, 200, res);
+});
+
+// Lightweight email delivery for password reset codes using Nodemailer only (never logs codes)
+async function deliverResetCode(email, code) {
+  try {
+    const host = process.env.SMTP_HOST;
+    const port = parseInt(process.env.SMTP_PORT || '587', 10);
+    const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || port === 465; // true for 465, false for other ports
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+    const from = process.env.EMAIL_FROM;
+
+    if (!host || !user || !pass || !from) {
+      console.warn('Email transport not configured: set SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, EMAIL_FROM');
+      return true; // Do not fail the flow; just avoid leaking the code
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth: { user, pass },
+    });
+
+    const html = `
+      <div style="font-family:Arial,sans-serif; color:#111;">
+        <h2 style="margin:0 0 8px 0;">Password reset code</h2>
+        <p style="margin:0 0 12px 0;">Use the 6-digit code below to reset your Ramona Jewels account password. This code expires in 10 minutes.</p>
+        <div style="font-size:28px; font-weight:700; letter-spacing:6px; padding:12px 16px; background:#f4f4f5; display:inline-block; border-radius:8px;">${code}</div>
+        <p style="margin:16px 0 0 0; color:#555;">If you didn't request this, you can safely ignore this email.</p>
+      </div>
+    `;
+
+    await transporter.sendMail({
+      from,
+      to: email,
+      subject: 'Your Ramona Jewels password reset code',
+      html,
+    });
+
+    return true;
+  } catch (e) {
+    console.warn('deliverResetCode error', e);
+    return false;
+  }
+}
+
+// @desc    Request password reset (send 6-digit code)
+// @route   POST /api/v1/auth/forgot-password
+// @access  Public
+exports.forgotPassword = asyncHandler(async (req, res, next) => {
+  const { email } = req.body || {};
+  if (!email) return next(new ErrorResponse('Email is required', 400));
+
+  const user = await User.findOne({ email });
+  if (!user) {
+    // Do not reveal that email does not exist
+    return res.status(200).json({ success: true, message: 'If that account exists, a code has been sent.' });
+  }
+
+  // Generate 6-digit numeric code
+  const code = (Math.floor(100000 + Math.random() * 900000)).toString();
+  const hashed = await bcrypt.hash(code, 10);
+  user.resetPasswordCode = hashed;
+  user.resetPasswordExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+  user.resetPasswordAttempts = 0;
+  await user.save({ validateModifiedOnly: true });
+
+  await deliverResetCode(email, code);
+
+  return res.status(200).json({ success: true, message: 'If that account exists, a code has been sent.' });
+});
+
+// @desc    Verify reset code
+// @route   POST /api/v1/auth/verify-reset-code
+// @access  Public
+exports.verifyResetCode = asyncHandler(async (req, res, next) => {
+  const { email, code } = req.body || {};
+  if (!email || !code) return next(new ErrorResponse('Email and code are required', 400));
+
+  const user = await User.findOne({ email }).select('+resetPasswordCode');
+  if (!user || !user.resetPasswordCode || !user.resetPasswordExpires) {
+    return next(new ErrorResponse('Invalid or expired code', 400));
+  }
+
+  if (user.resetPasswordExpires < new Date()) {
+    return next(new ErrorResponse('Code has expired. Please request a new one.', 400));
+  }
+
+  // Limit attempts to avoid brute force
+  const maxAttempts = 5;
+  if ((user.resetPasswordAttempts || 0) >= maxAttempts) {
+    return next(new ErrorResponse('Too many invalid attempts. Please request a new code.', 429));
+  }
+
+  const match = await bcrypt.compare(code, user.resetPasswordCode);
+  if (!match) {
+    user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
+    await user.save({ validateModifiedOnly: true });
+    return next(new ErrorResponse('Invalid code', 400));
+  }
+
+  // Reset attempts but keep code so it can be used on reset-password too
+  user.resetPasswordAttempts = 0;
+  await user.save({ validateModifiedOnly: true });
+
+  return res.status(200).json({ success: true, message: 'Code verified. You may reset your password now.' });
+});
+
+// @desc    Reset password with verified code
+// @route   POST /api/v1/auth/reset-password
+// @access  Public
+exports.resetPassword = asyncHandler(async (req, res, next) => {
+  const { email, code, newPassword } = req.body || {};
+  if (!email || !code || !newPassword) return next(new ErrorResponse('Email, code and newPassword are required', 400));
+  if (typeof newPassword !== 'string' || newPassword.length < 6) {
+    return next(new ErrorResponse('Password must be at least 6 characters', 400));
+  }
+
+  const user = await User.findOne({ email }).select('+password +resetPasswordCode');
+  if (!user || !user.resetPasswordCode || !user.resetPasswordExpires) {
+    return next(new ErrorResponse('Invalid or expired code', 400));
+  }
+
+  if (user.resetPasswordExpires < new Date()) {
+    return next(new ErrorResponse('Code has expired. Please request a new one.', 400));
+  }
+
+  const match = await bcrypt.compare(code, user.resetPasswordCode);
+  if (!match) {
+    return next(new ErrorResponse('Invalid code', 400));
+  }
+
+  // Update password and clear reset fields
+  user.password = newPassword;
+  user.resetPasswordCode = undefined;
+  user.resetPasswordExpires = undefined;
+  user.resetPasswordAttempts = 0;
+  await user.save();
+
+  return res.status(200).json({ success: true, message: 'Password reset successful. You can now log in.' });
 });

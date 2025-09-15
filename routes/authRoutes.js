@@ -9,6 +9,9 @@ const {
   changePassword,
   googleLogin,
   facebookLogin,
+  forgotPassword,
+  verifyResetCode,
+  resetPassword,
 } = require('../controllers/authController');
 const { protect } = require('../middlewares/auth');
 
@@ -265,5 +268,10 @@ router.put('/profile', protect, updateProfile);
  *               $ref: '#/components/schemas/Error'
  */
 router.put('/password', protect, changePassword);
+
+// Forgot password flow
+router.post('/forgot-password', forgotPassword);
+router.post('/verify-reset-code', verifyResetCode);
+router.post('/reset-password', resetPassword);
 
 module.exports = router;
