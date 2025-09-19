@@ -9,6 +9,9 @@ const {
   createOrder,
   createStripePaymentIntent,
   handleStripeWebhook,
+  // Add PayPal handlers
+  createPayPalOrder,
+  capturePayPalOrder,
 } = require('../controllers/orderController');
 const { protect, authorize } = require('../middlewares/auth');
 // Add asyncHandler and Order model for the user-specific orders endpoint
@@ -145,6 +148,9 @@ router.get('/:id', protect, getOrderById);
 
 router.post('/', protect, createOrder);
 router.post('/stripe/create-payment-intent', protect, createStripePaymentIntent);
+// New PayPal routes
+router.post('/paypal/create-order', protect, createPayPalOrder);
+router.post('/paypal/capture-order', protect, capturePayPalOrder);
 router.patch('/:id/status', protect, authorize('admin'), updateOrderStatus);
 router.patch('/:id/cancel', protect, cancelOrder);
 router.post('/:id/refund', protect, authorize('admin'), refundOrder);

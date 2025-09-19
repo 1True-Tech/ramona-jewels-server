@@ -5,6 +5,7 @@ const Cart = require('../models/Cart');
 const asyncHandler = require('express-async-handler');
 const { emitAnalyticsUpdate, emitOrderPaymentUpdate } = require('../config/socket');
 const { computeAnalyticsSnapshot } = require('./analyticsController');
+const fetch = require('node-fetch')
 
 // Stripe setup
 let stripe = null
@@ -486,16 +487,6 @@ const refundOrder = asyncHandler(async (req, res) => {
   }
 });
 
-module.exports = {
-  getAllOrders,
-  getOrderStats,
-  getOrderById,
-  createOrder,
-  updateOrderStatus,
-  cancelOrder,
-  refundOrder,
-}
-
 // --- Stripe Integration ---
 
 // Helper to compute shipping consistent with frontend
@@ -738,6 +729,230 @@ async function handleStripeWebhook(req, res) {
   }
 }
 
-// Export new handlers in addition to previous ones
-module.exports.createStripePaymentIntent = createStripePaymentIntent
-module.exports.handleStripeWebhook = handleStripeWebhook
+// Helper: PayPal configuration and token retrieval
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || ''
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || ''
+const PAYPAL_ENV = (process.env.PAYPAL_ENV || 'sandbox').toLowerCase()
+const PAYPAL_API_BASE = PAYPAL_ENV === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com'
+
+async function getPayPalAccessToken() {
+  if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
+    throw new Error('PayPal client credentials not configured')
+  }
+  const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64')
+  const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  })
+  if (!res.ok) {
+    const txt = await res.text()
+    throw new Error(`PayPal token error: ${res.status} ${txt}`)
+  }
+  const data = await res.json()
+  return data.access_token
+}
+
+// Create PayPal Order and pending DB order
+const createPayPalOrder = asyncHandler(async (req, res) => {
+  try {
+    // Optional settings gate similar to Stripe
+    try {
+      const Settings = require('../models/Settings');
+      const settings = await Settings.getSingleton();
+      if (settings?.payments && settings.payments.paypal && settings.payments.paypal.enabled === false) {
+        return res.status(403).json({ success: false, message: 'PayPal payments are currently disabled by admin' })
+      }
+    } catch (_) {}
+
+    const {
+      items,
+      shippingAddress,
+      billingAddress,
+      customerInfo,
+      notes,
+      shippingMethod = 'standard',
+    } = req.body || {}
+
+    if (!items || !items.length) {
+      return res.status(400).json({ success: false, message: 'No order items provided' })
+    }
+
+    // Build items and totals using existing helpers
+    const { orderItems, subtotal, shipping, tax, total } = await buildItemsAndTotals(items, shippingMethod)
+
+    const fallback = { name: customerInfo?.name || req.user.name, phone: customerInfo?.phone || req.user.phone }
+    const normalizedShipping = normalizeAddress(shippingAddress, fallback)
+    const normalizedBilling = normalizeAddress(billingAddress, fallback) || normalizedShipping
+    if (!isAddressComplete(normalizedShipping)) {
+      return res.status(400).json({ success: false, message: 'Shipping address incomplete: name, street, city, state, zipCode, country are required.' })
+    }
+
+    const accessToken = await getPayPalAccessToken()
+    const readableOrderId = await generateReadableOrderId()
+
+    const amount = {
+      currency_code: 'USD',
+      value: total.toFixed(2),
+      breakdown: {
+        item_total: { currency_code: 'USD', value: subtotal.toFixed(2) },
+        shipping: { currency_code: 'USD', value: shipping.toFixed(2) },
+        tax_total: { currency_code: 'USD', value: tax.toFixed(2) },
+      },
+    }
+
+    const orderBody = {
+      intent: 'CAPTURE',
+      purchase_units: [
+        {
+          reference_id: readableOrderId,
+          amount,
+        },
+      ],
+      application_context: {
+        brand_name: 'Ramona Jewels',
+        user_action: 'PAY_NOW',
+      },
+    }
+
+    const ppRes = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(orderBody),
+    })
+
+    if (!ppRes.ok) {
+      const text = await ppRes.text()
+      return res.status(500).json({ success: false, message: `Failed to create PayPal order: ${text}` })
+    }
+
+    const ppOrder = await ppRes.json()
+    const approvalLink = (ppOrder.links || []).find((l) => l.rel === 'approve')?.href
+
+    // Create pending order in DB linked to PayPal order id
+    const order = await Order.create({
+      orderId: readableOrderId,
+      userId: req.user.id,
+      items: orderItems,
+      subtotal,
+      shipping,
+      tax,
+      total,
+      paymentMethod: 'paypal',
+      paymentStatus: 'pending',
+      paymentId: ppOrder.id,
+      shippingAddress: normalizedShipping,
+      billingAddress: normalizedBilling,
+      customerInfo: customerInfo || {
+        name: req.user.name,
+        email: req.user.email,
+        phone: req.user.phone,
+      },
+      notes,
+      status: 'pending',
+    })
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        paypalOrderId: ppOrder.id,
+        approveLink: approvalLink,
+        orderId: order._id,
+        readableOrderId,
+        amount: Math.round(total * 100),
+      },
+      message: 'PayPal order created',
+    })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Server error creating PayPal order' })
+  }
+})
+
+// Capture PayPal Order and update DB order
+const capturePayPalOrder = asyncHandler(async (req, res) => {
+  try {
+    const { paypalOrderId } = req.body || {}
+    if (!paypalOrderId) {
+      return res.status(400).json({ success: false, message: 'paypalOrderId is required' })
+    }
+
+    const accessToken = await getPayPalAccessToken()
+    const capRes = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders/${paypalOrderId}/capture`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    const capJson = await capRes.json().catch(() => ({}))
+    if (!capRes.ok) {
+      return res.status(500).json({ success: false, message: `PayPal capture failed`, data: capJson })
+    }
+
+    const status = capJson.status || capJson?.purchase_units?.[0]?.payments?.captures?.[0]?.status
+    const isCompleted = String(status).toUpperCase() === 'COMPLETED'
+
+    // Find related order by paymentId
+    const order = await Order.findOne({ paymentId: paypalOrderId, userId: req.user.id })
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Related order not found' })
+    }
+
+    if (isCompleted) {
+      order.paymentStatus = 'paid'
+      if (order.status === 'pending') order.status = 'processing'
+      await order.save()
+      // Clear user cart
+      try { await Cart.findOneAndUpdate({ user: order.userId }, { $set: { items: [] } }) } catch (_) {}
+      // Emit realtime update
+      try {
+        emitOrderPaymentUpdate(String(order._id), {
+          orderId: String(order._id),
+          paymentStatus: order.paymentStatus,
+          status: order.status,
+        })
+      } catch (_) {}
+      // Analytics snapshot
+      try {
+        const snapshot = await computeAnalyticsSnapshot();
+        emitAnalyticsUpdate(snapshot);
+      } catch (_) {}
+    } else {
+      order.paymentStatus = 'failed'
+      await order.save()
+      try {
+        emitOrderPaymentUpdate(String(order._id), {
+          orderId: String(order._id),
+          paymentStatus: order.paymentStatus,
+          status: order.status,
+        })
+      } catch (_) {}
+    }
+
+    return res.status(200).json({ success: true, data: { orderId: String(order._id), status: order.status, paymentStatus: order.paymentStatus, paypal: capJson } })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Server error capturing PayPal order' })
+  }
+})
+
+// Final exports moved to the end to avoid referencing before initialization
+module.exports = {
+  getAllOrders,
+  getOrderStats,
+  getOrderById,
+  createOrder,
+  updateOrderStatus,
+  cancelOrder,
+  refundOrder,
+  createStripePaymentIntent,
+  handleStripeWebhook,
+  createPayPalOrder,
+  capturePayPalOrder,
+}
