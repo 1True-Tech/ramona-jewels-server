@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Cart = require('../models/Cart');
 const asyncHandler = require('../utils/async');
 const ErrorResponse = require('../utils/errorResponse');
+const Order = require('../models/Order');
 
 // @desc    Get all users with pagination and filtering
 // @route   GET /api/admin/users
@@ -99,58 +100,55 @@ exports.getUserStats = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    Get top users by activity (orders and spending)
+// @desc    Get top users by total paid spend
 // @route   GET /api/admin/users/top
 // @access  Private/Admin
 exports.getTopUsers = asyncHandler(async (req, res, next) => {
   const limit = parseInt(req.query.limit, 10) || 5;
-  
-  // Get all users
-  const users = await User.find({ isActive: true })
-    .select('-password -refreshTokens')
-    .sort({ createdAt: -1 });
-  
-  // Calculate activity score for each user
-  const usersWithActivity = await Promise.all(
-    users.map(async (user) => {
-      const carts = await Cart.find({ user: user._id });
-      const orders = carts.length;
-      const totalSpent = carts.reduce((total, cart) => {
-        return total + (cart.totalPrice || 0);
-      }, 0);
-      
-      // Activity score based on orders and spending
-      const activityScore = orders * 10 + totalSpent * 0.1;
-      
-      return {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone || '+1 (555) 000-0000',
-        role: user.role === 'user' ? 'customer' : user.role,
-        status: user.isActive ? 'active' : 'inactive',
-        joinDate: user.createdAt.toISOString().split('T')[0],
-        orders,
-        totalSpent,
-        avatar: '/placeholder.svg',
-        lastActivity: user.lastLogin || user.updatedAt,
-        activityScore
-      };
-    })
-  );
-  
-  // Sort by activity score and get top users
-  const topUsers = usersWithActivity
-    .sort((a, b) => b.activityScore - a.activityScore)
-    .slice(0, limit)
-    .map(user => {
-      const { activityScore, ...userWithoutScore } = user;
-      return userWithoutScore;
-    });
-  
+
+  const topUsers = await Order.aggregate([
+    { $match: { paymentStatus: 'paid' } },
+    {
+      $group: {
+        _id: '$userId',
+        orders: { $sum: 1 },
+        totalSpent: { $sum: '$total' },
+        lastActivity: { $max: '$createdAt' },
+      },
+    },
+    { $sort: { totalSpent: -1 } },
+    { $limit: limit },
+    {
+      $lookup: {
+        from: 'users',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'user',
+      },
+    },
+    { $unwind: '$user' },
+    { $match: { 'user.isActive': true } },
+    {
+      $project: {
+        _id: 0,
+        id: '$_id',
+        name: '$user.name',
+        email: '$user.email',
+        phone: { $ifNull: ['$user.phone', '+1 (555) 000-0000'] },
+        role: { $cond: [{ $eq: ['$user.role', 'user'] }, 'customer', '$user.role'] },
+        status: { $cond: ['$user.isActive', 'active', 'inactive'] },
+        joinDate: { $dateToString: { format: '%Y-%m-%d', date: '$user.createdAt' } },
+        orders: 1,
+        totalSpent: 1,
+        avatar: { $literal: '/placeholder.svg' },
+        lastActivity: 1,
+      },
+    },
+  ]);
+
   res.status(200).json({
     success: true,
-    data: topUsers
+    data: topUsers,
   });
 });
 

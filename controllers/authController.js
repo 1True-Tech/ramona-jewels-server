@@ -72,6 +72,11 @@ exports.googleLogin = asyncHandler(async (req, res, next) => {
     if (shouldSave) await user.save({ validateModifiedOnly: true });
   }
 
+  // Block deactivated accounts from logging in via Google
+  if (user && user.isActive === false) {
+    return next(new ErrorResponse('Account has been suspended', 401));
+  }
+
   sendTokenResponse(user, 200, res);
 });
 
@@ -162,6 +167,11 @@ exports.facebookLogin = asyncHandler(async (req, res, next) => {
         shouldSave = true;
       }
       if (shouldSave) await user.save({ validateModifiedOnly: true });
+    }
+
+    // Block deactivated accounts from logging in via Facebook
+    if (user && user.isActive === false) {
+      return next(new ErrorResponse('Account has been deactivated', 401));
     }
 
     sendTokenResponse(user, 200, res);
@@ -300,98 +310,77 @@ async function deliverResetCode(email, code) {
   }
 }
 
-// @desc    Request password reset (send 6-digit code)
-// @route   POST /api/v1/auth/forgot-password
+// @desc    Forgot password (request reset code)
+// @route   POST /api/v1/auth/forgotpassword
 // @access  Public
 exports.forgotPassword = asyncHandler(async (req, res, next) => {
-  const { email } = req.body || {};
-  if (!email) return next(new ErrorResponse('Email is required', 400));
+  const { email } = req.body;
 
-  const user = await User.findOne({ email });
-  if (!user) {
-    // Do not reveal that email does not exist
-    return res.status(200).json({ success: true, message: 'If that account exists, a code has been sent.' });
+  if (!email) return next(new ErrorResponse('Please provide an email', 400));
+
+  const user = await User.findOne({ email }).select('+resetPasswordAttempts +resetPasswordExpires');
+  if (!user) return next(new ErrorResponse('Email not found', 404));
+
+  // Rate-limit attempts: max 3 within 30 minutes
+  const now = Date.now();
+  if (user.resetPasswordAttempts && user.resetPasswordExpires && user.resetPasswordExpires > now) {
+    return next(new ErrorResponse('Too many requests, please try again later', 429));
   }
 
-  // Generate 6-digit numeric code
-  const code = (Math.floor(100000 + Math.random() * 900000)).toString();
-  const hashed = await bcrypt.hash(code, 10);
-  user.resetPasswordCode = hashed;
-  user.resetPasswordExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-  user.resetPasswordAttempts = 0;
+  // Generate a 6-digit code and expiry
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  user.resetPasswordCode = code;
+  user.resetPasswordExpires = new Date(now + 10 * 60 * 1000); // 10 minutes
+  user.resetPasswordAttempts = 1;
   await user.save({ validateModifiedOnly: true });
 
-  await deliverResetCode(email, code);
+  // Attempt to email the code, but never log it
+  await deliverResetCode(user.email, code);
 
-  return res.status(200).json({ success: true, message: 'If that account exists, a code has been sent.' });
+  res.status(200).json({ success: true, message: 'If this email exists, a reset code has been sent' });
 });
 
 // @desc    Verify reset code
-// @route   POST /api/v1/auth/verify-reset-code
+// @route   POST /api/v1/auth/verify-code
 // @access  Public
 exports.verifyResetCode = asyncHandler(async (req, res, next) => {
-  const { email, code } = req.body || {};
-  if (!email || !code) return next(new ErrorResponse('Email and code are required', 400));
+  const { email, code } = req.body;
 
-  const user = await User.findOne({ email }).select('+resetPasswordCode');
+  if (!email || !code) return next(new ErrorResponse('Please provide email and code', 400));
+
+  const user = await User.findOne({ email }).select('+resetPasswordCode +resetPasswordExpires');
   if (!user || !user.resetPasswordCode || !user.resetPasswordExpires) {
-    return next(new ErrorResponse('Invalid or expired code', 400));
-  }
-
-  if (user.resetPasswordExpires < new Date()) {
-    return next(new ErrorResponse('Code has expired. Please request a new one.', 400));
-  }
-
-  // Limit attempts to avoid brute force
-  const maxAttempts = 5;
-  if ((user.resetPasswordAttempts || 0) >= maxAttempts) {
-    return next(new ErrorResponse('Too many invalid attempts. Please request a new code.', 429));
-  }
-
-  const match = await bcrypt.compare(code, user.resetPasswordCode);
-  if (!match) {
-    user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
-    await user.save({ validateModifiedOnly: true });
     return next(new ErrorResponse('Invalid code', 400));
   }
 
-  // Reset attempts but keep code so it can be used on reset-password too
-  user.resetPasswordAttempts = 0;
-  await user.save({ validateModifiedOnly: true });
+  if (user.resetPasswordExpires < Date.now() || user.resetPasswordCode !== code) {
+    return next(new ErrorResponse('Invalid or expired code', 400));
+  }
 
-  return res.status(200).json({ success: true, message: 'Code verified. You may reset your password now.' });
+  res.status(200).json({ success: true, message: 'Code verified' });
 });
 
-// @desc    Reset password with verified code
-// @route   POST /api/v1/auth/reset-password
+// @desc    Reset password
+// @route   POST /api/v1/auth/resetpassword
 // @access  Public
 exports.resetPassword = asyncHandler(async (req, res, next) => {
-  const { email, code, newPassword } = req.body || {};
-  if (!email || !code || !newPassword) return next(new ErrorResponse('Email, code and newPassword are required', 400));
-  if (typeof newPassword !== 'string' || newPassword.length < 6) {
-    return next(new ErrorResponse('Password must be at least 6 characters', 400));
-  }
+  const { email, code, newPassword } = req.body;
 
-  const user = await User.findOne({ email }).select('+password +resetPasswordCode');
+  if (!email || !code || !newPassword) return next(new ErrorResponse('Please provide email, code, and new password', 400));
+
+  const user = await User.findOne({ email }).select('+resetPasswordCode +resetPasswordExpires');
   if (!user || !user.resetPasswordCode || !user.resetPasswordExpires) {
-    return next(new ErrorResponse('Invalid or expired code', 400));
-  }
-
-  if (user.resetPasswordExpires < new Date()) {
-    return next(new ErrorResponse('Code has expired. Please request a new one.', 400));
-  }
-
-  const match = await bcrypt.compare(code, user.resetPasswordCode);
-  if (!match) {
     return next(new ErrorResponse('Invalid code', 400));
   }
 
-  // Update password and clear reset fields
+  if (user.resetPasswordExpires < Date.now() || user.resetPasswordCode !== code) {
+    return next(new ErrorResponse('Invalid or expired code', 400));
+  }
+
   user.password = newPassword;
   user.resetPasswordCode = undefined;
   user.resetPasswordExpires = undefined;
-  user.resetPasswordAttempts = 0;
   await user.save();
 
-  return res.status(200).json({ success: true, message: 'Password reset successful. You can now log in.' });
+  sendTokenResponse(user, 200, res);
 });

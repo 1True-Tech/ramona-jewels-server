@@ -19,6 +19,15 @@ exports.protect = async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = await User.findById(decoded.id);
+
+    // Block access if user does not exist or has been deactivated
+    if (!req.user) {
+      return next(new ErrorResponse('Not authorized to access this route', 401));
+    }
+    if (!req.user.isActive) {
+      return next(new ErrorResponse('Account has been deactivated', 401));
+    }
+
     next();
   } catch (err) {
     return next(new ErrorResponse('Not authorized to access this route', 401));
