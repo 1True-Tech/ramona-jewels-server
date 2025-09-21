@@ -21,6 +21,9 @@ exports.register = asyncHandler(async (req, res, next) => {
     role,
   });
 
+  // Fire-and-forget welcome email (do not block registration flow)
+  deliverWelcomeEmail(user.email, user.name).catch(() => {});
+
   sendTokenResponse(user, 200, res);
 });
 
@@ -55,9 +58,11 @@ exports.googleLogin = asyncHandler(async (req, res, next) => {
 
   // Proceed with normal google auth flow (sign in or create/link)
   let user = await User.findOne({ $or: [{ googleId }, { email }] });
+  let createdNew = false;
   if (!user) {
     // Create OAuth user without password
     user = await User.create({ name, email, provider: 'google', googleId });
+    createdNew = true;
   } else {
     // Link Google account if not linked yet
     let shouldSave = false;
@@ -75,6 +80,11 @@ exports.googleLogin = asyncHandler(async (req, res, next) => {
   // Block deactivated accounts from logging in via Google
   if (user && user.isActive === false) {
     return next(new ErrorResponse('Account has been suspended', 401));
+  }
+
+  // Send welcome email on first-time Google signup
+  if (createdNew) {
+    deliverWelcomeEmail(user.email, user.name).catch(() => {});
   }
 
   sendTokenResponse(user, 200, res);
@@ -154,8 +164,10 @@ exports.facebookLogin = asyncHandler(async (req, res, next) => {
     }
 
     let user = await User.findOne({ $or: [{ facebookId }, { email }] });
+    let createdNew = false;
     if (!user) {
       user = await User.create({ name, email, provider: 'facebook', facebookId });
+      createdNew = true;
     } else {
       let shouldSave = false;
       if (!user.facebookId && facebookId) {
@@ -172,6 +184,11 @@ exports.facebookLogin = asyncHandler(async (req, res, next) => {
     // Block deactivated accounts from logging in via Facebook
     if (user && user.isActive === false) {
       return next(new ErrorResponse('Account has been deactivated', 401));
+    }
+
+    // Send welcome email on first-time Facebook signup
+    if (createdNew) {
+      deliverWelcomeEmail(user.email, user.name).catch(() => {});
     }
 
     sendTokenResponse(user, 200, res);
@@ -384,3 +401,55 @@ exports.resetPassword = asyncHandler(async (req, res, next) => {
 
   sendTokenResponse(user, 200, res);
 });
+
+// Lightweight welcome email delivery (non-blocking, best-effort)
+async function deliverWelcomeEmail(email, name) {
+  try {
+    const host = process.env.SMTP_HOST;
+    const port = parseInt(process.env.SMTP_PORT || '587', 10);
+    const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || port === 465;
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+    const from = process.env.EMAIL_FROM;
+
+    if (!host || !user || !pass || !from) {
+      console.warn('Email transport not configured: set SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, EMAIL_FROM');
+      return true; // Do not fail signup if email is not configured
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth: { user, pass },
+    });
+
+    const safeName = (name && String(name).trim()) || (email?.split('@')[0]) || 'there';
+    const html = `
+      <div style="font-family:Arial,sans-serif; color:#111;">
+        <h1 style="margin:0 0 12px 0;">Welcome to <span style="color:#8b5cf6;">Ramona Jewels</span>, ${safeName}!</h1>
+        <p style="margin:0 0 12px 0;">We're thrilled to have you here. Your account has been created successfully.</p>
+        <p style="margin:0 0 12px 0;">Here are some quick links to help you get started:</p>
+        <ul style="margin:0 0 16px 20px;">
+          <li><a href="${process.env.APP_PUBLIC_URL || '#'}" style="color:#8b5cf6; text-decoration:none;">Browse our latest collections</a></li>
+          <li><a href="${(process.env.APP_PUBLIC_URL || '') + '/profile'}" style="color:#8b5cf6; text-decoration:none;">Update your profile</a></li>
+          <li><a href="${(process.env.APP_PUBLIC_URL || '') + '/wishlist'}" style="color:#8b5cf6; text-decoration:none;">Start your wishlist</a></li>
+        </ul>
+        <p style="margin:0 0 12px 0; color:#555;">If you have any questions, just reply to this email — we're always happy to help.</p>
+        <p style="margin:16px 0 0 0;">With warmth,<br/>The Ramona Jewels Team</p>
+      </div>
+    `;
+
+    await transporter.sendMail({
+      from,
+      to: email,
+      subject: 'Welcome to Ramona Jewels ✨',
+      html,
+    });
+
+    return true;
+  } catch (e) {
+    console.warn('deliverWelcomeEmail error', e);
+    return false;
+  }
+}

@@ -8,10 +8,17 @@ const Category = require('../models/category');
 // @desc    Get all perfumes
 // @route   GET /api/v1/perfumes
 // @route   GET /api/v1/categories/:categoryId/perfumes
-// @access  Public
+// @access  Public (admin sees all, customers see only in-stock)
 exports.getPerfumes = asyncHandler(async (req, res, next) => {
+  const isAdmin = !!(req.user && req.user.role === 'admin');
+
   if (req.params.categoryId) {
-    const perfumes = await Perfume.find({ category: req.params.categoryId });
+    if (isAdmin) {
+      const perfumes = await Perfume.find({ category: req.params.categoryId });
+      return res.status(200).json({ success: true, count: perfumes.length, data: perfumes });
+    }
+    // Only fetch in-stock products within the category for non-admins
+    const perfumes = await Perfume.find({ category: req.params.categoryId, inStock: true, stockCount: { $gt: 0 } });
 
     return res.status(200).json({
       success: true,
@@ -19,13 +26,37 @@ exports.getPerfumes = asyncHandler(async (req, res, next) => {
       data: perfumes,
     });
   } else {
-    res.status(200).json(res.advancedResults);
+    // If advancedResults has pre-fetched data
+    if (res.advancedResults && Array.isArray(res.advancedResults.data)) {
+      if (isAdmin) {
+        return res.status(200).json({
+          success: true,
+          count: res.advancedResults.data.length,
+          pagination: res.advancedResults.pagination,
+          data: res.advancedResults.data,
+        });
+      }
+      const filtered = res.advancedResults.data.filter(p => p && p.inStock === true && (p.stockCount ?? 0) > 0);
+      return res.status(200).json({
+        success: true,
+        count: filtered.length,
+        pagination: res.advancedResults.pagination,
+        data: filtered,
+      });
+    }
+    // Fallback direct query
+    if (isAdmin) {
+      const perfumes = await Perfume.find().sort('-createdAt');
+      return res.status(200).json({ success: true, count: perfumes.length, data: perfumes });
+    }
+    const perfumes = await Perfume.find({ inStock: true, stockCount: { $gt: 0 } }).sort('-createdAt');
+    res.status(200).json({ success: true, count: perfumes.length, data: perfumes });
   }
 });
 
 // @desc    Get single perfume
 // @route   GET /api/v1/perfumes/:id
-// @access  Public
+// @access  Public (admin sees all, customers only see in-stock)
 exports.getPerfume = asyncHandler(async (req, res, next) => {
   const perfume = await Perfume.findById(req.params.id);
 
@@ -33,6 +64,14 @@ exports.getPerfume = asyncHandler(async (req, res, next) => {
     return next(
       new ErrorResponse(`Perfume not found with id of ${req.params.id}`, 404)
     );
+  }
+
+  const isAdmin = !!(req.user && req.user.role === 'admin');
+  if (!isAdmin) {
+    const inStock = perfume.inStock === true && (perfume.stockCount ?? 0) > 0;
+    if (!inStock) {
+      return next(new ErrorResponse(`Perfume not found with id of ${req.params.id}`, 404));
+    }
   }
 
   res.status(200).json({

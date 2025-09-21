@@ -356,15 +356,39 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
       });
     }
 
+    // Determine if we should adjust inventory: only when transitioning to delivered and payment was completed
+    const transitioningToDelivered = status === 'delivered' && order.status !== 'delivered';
+    const shouldAdjustInventory = transitioningToDelivered && order.paymentStatus === 'paid';
+
     const updateData = { status };
     if (trackingNumber) updateData.trackingNumber = trackingNumber;
     if (notes) updateData.notes = notes;
+    if (status === 'delivered' && !order.actualDelivery) updateData.actualDelivery = new Date();
 
     const updatedOrder = await Order.findByIdAndUpdate(
       req.params.id,
       updateData,
       { new: true }
     );
+
+    // If delivered and paid, decrement stock for each product item in the order
+    if (shouldAdjustInventory) {
+      try {
+        for (const item of order.items) {
+          if (!item.productId || !item.quantity) continue;
+          const product = await Perfume.findById(item.productId);
+          if (!product) continue;
+          const newCount = Math.max(0, (product.stockCount || 0) - item.quantity);
+          const inStock = newCount > 0;
+          // Update product stock and inStock flag
+          await Perfume.findByIdAndUpdate(product._id, {
+            $set: { stockCount: newCount, inStock }
+          });
+        }
+      } catch (_) {
+        // Do not fail the status update if stock adjustment encounters an issue
+      }
+    }
 
     // Emit analytics snapshot after status update
     try {
