@@ -408,35 +408,54 @@ async function deliverWelcomeEmail(email, name) {
     const host = process.env.SMTP_HOST;
     const port = parseInt(process.env.SMTP_PORT || '587', 10);
     const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || port === 465;
-    const user = process.env.SMTP_USER;
-    const pass = process.env.SMTP_PASS;
-    const from = process.env.EMAIL_FROM;
+    const user = (process.env.SMTP_USER || '').trim();
+    let pass = process.env.SMTP_PASS || '';
+    // Normalize common Gmail app password format (remove spaces)
+    pass = pass.replace(/\s+/g, '');
+    let from = (process.env.EMAIL_FROM || '').trim();
+    const displayName = (process.env.EMAIL_FROM_NAME || 'Ramona Jewels').trim();
 
-    if (!host || !user || !pass || !from) {
-      console.warn('Email transport not configured: set SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, EMAIL_FROM');
+    if (!host || !user || !pass) {
+      console.warn('Email transport not configured: set SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS');
       return true; // Do not fail signup if email is not configured
     }
 
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure,
-      auth: { user, pass },
-    });
+    // Fallback to a valid from header if misconfigured
+    if (!from) {
+      from = `${displayName} <${user}>`;
+    }
 
+    let transporter;
+    // Use Gmail service config automatically when SMTP host is Gmail
+    if (/gmail\.com$/i.test(host)) {
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user, pass },
+      });
+    } else {
+      transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        auth: { user, pass },
+      });
+    }
+
+    // Resolve public app url for links
+    const appUrl = process.env.BASE_URL || '';
     const safeName = (name && String(name).trim()) || (email?.split('@')[0]) || 'there';
     const html = `
       <div style="font-family:Arial,sans-serif; color:#111;">
-        <h1 style="margin:0 0 12px 0;">Welcome to <span style="color:#8b5cf6;">Ramona Jewels</span>, ${safeName}!</h1>
-        <p style="margin:0 0 12px 0;">We're thrilled to have you here. Your account has been created successfully.</p>
-        <p style="margin:0 0 12px 0;">Here are some quick links to help you get started:</p>
+        <h1 style="margin:0 0 12px 0; font-size: 22px;">Welcome to <span style="color:#ffbf00;">Monas Kreashon</span>, ${safeName}!</h1>
+        <p style="margin:0 0 12px 0; font-size: 14px;">We're thrilled to have you here. Your account has been created successfully.</p>
+        <p style="margin:0 0 12px">Here are some quick links to help you get started:</p>
         <ul style="margin:0 0 16px 20px;">
-          <li><a href="${process.env.APP_PUBLIC_URL || '#'}" style="color:#8b5cf6; text-decoration:none;">Browse our latest collections</a></li>
-          <li><a href="${(process.env.APP_PUBLIC_URL || '') + '/profile'}" style="color:#8b5cf6; text-decoration:none;">Update your profile</a></li>
-          <li><a href="${(process.env.APP_PUBLIC_URL || '') + '/wishlist'}" style="color:#8b5cf6; text-decoration:none;">Start your wishlist</a></li>
+          <li><a href="${appUrl || ''}" style="color:#ffbf00; text-decoration:none;">Browse our latest collections</a></li>
+          <li><a href="${(appUrl || '') + '/profile'}" style="color:#ffbf00; text-decoration:none;">Update your profile</a></li>
+          <li><a href="${(appUrl || '') + '/wishlist'}" style="color:#ffbf00; text-decoration:none;">Start your wishlist</a></li>
         </ul>
         <p style="margin:0 0 12px 0; color:#555;">If you have any questions, just reply to this email — we're always happy to help.</p>
-        <p style="margin:16px 0 0 0;">With warmth,<br/>The Ramona Jewels Team</p>
+        <p style="margin:16px 0 0 0;">With warmth,<br/>The Monas Kreashon Team</p>
       </div>
     `;
 

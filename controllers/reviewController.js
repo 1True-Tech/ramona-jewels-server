@@ -61,3 +61,16 @@ exports.createReview = asyncHandler(async (req, res, next) => {
 
   res.status(201).json({ success: true, data: review });
 });
+
+// @desc    Get random reviews across all products
+// @route   GET /api/v1/perfumes/reviews/random
+// @access  Public
+exports.getRandomReviews = asyncHandler(async (req, res, next) => {
+  const size = Math.max(1, Math.min(50, Number(req.query.limit) || 3));
+  const reviews = await Review.aggregate([
+    { $sample: { size } },
+    { $project: { productId: 1, name: 1, rating: 1, comment: 1, createdAt: 1 } },
+  ]);
+
+  res.status(200).json({ success: true, count: reviews.length, data: reviews });
+});
