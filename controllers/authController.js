@@ -442,7 +442,7 @@ async function deliverWelcomeEmail(email, name) {
     }
 
     // Resolve public app url for links
-    const appUrl = process.env.BASE_URL || '';
+    const appUrl = process.env.BASE_URL || process.env.CLIENT_URL || '';
     const safeName = (name && String(name).trim()) || (email?.split('@')[0]) || 'there';
     const html = `
       <div style="font-family:Arial,sans-serif; color:#111;">
